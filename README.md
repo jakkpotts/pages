@@ -1,54 +1,140 @@
-<header>
+# Security Vulnerability Report: Domino’s Payment Bypass
 
-<!--
-  <<< Author notes: Course header >>>
-  Include a 1280×640 image, course title in sentence case, and a concise description in emphasis.
-  In your repository settings: enable template repository, add your 1280×640 social image, auto delete head branches.
-  Add your open source license, GitHub uses MIT license.
--->
+## Executive Summary
 
-# GitHub Pages
+A critical business logic vulnerability has been identified in Domino’s Power API that allows attackers to place delivery orders without providing payment information. The vulnerability stems from improper validation of empty payment arrays, enabling orders to be processed as “paid” when no payment method is actually provided.
 
-_Create a site or blog from your GitHub repositories with GitHub Pages._
+## Vulnerability Details
 
-</header>
+**Classification:**
 
-<!--
-  <<< Author notes: Step 1 >>>
-  Choose 3-5 steps for your course.
-  The first step is always the hardest, so pick something easy!
-  Link to docs.github.com for further explanations.
-  Encourage users to open new tabs for steps!
--->
+- **Category:** Functional/Business Logic
+- **Sub-Category:** Other
+- **Severity:** Critical
 
-## Step 1: Enable GitHub Pages
+## Affected Systems
 
-_Welcome to GitHub Pages and Jekyll :tada:!_
+**Vulnerable Endpoints:**
 
-The first step is to enable GitHub Pages on this [repository](https://docs.github.com/en/get-started/quickstart/github-glossary#repository). When you enable GitHub Pages on a repository, GitHub takes the content that's on the main branch and publishes a website based on its contents.
+- `POST https://order.dominos.com/power/place-order`
+- `POST https://order.dominos.com/power/price-order`
 
-### :keyboard: Activity: Enable GitHub Pages
+**Location:** Domino’s Power API, specifically within the Order.Payments JSON array handling logic
 
-1. Open a new browser tab, and work on the steps in your second tab while you read the instructions in this tab.
-1. Under your repository name, click **Settings**.
-1. Click **Pages** in the **Code and automation** section.
-1. Ensure "Deploy from a branch" is selected from the **Source** drop-down menu, and then select `main` from the **Branch** drop-down menu.
-1. Click the **Save** button.
-1. Wait about _one minute_ then refresh this page (the one you're following instructions from). [GitHub Actions](https://docs.github.com/en/actions) will automatically update to the next step.
-   > Turning on GitHub Pages creates a deployment of your repository. GitHub Actions may take up to a minute to respond while waiting for the deployment. Future steps will be about 20 seconds; this step is slower.
-   > **Note**: In the **Pages** of **Settings**, the **Visit site** button will appear at the top. Click the button to see your GitHub Pages site.
+**Vulnerable Parameter:** `Order.Payments` - empty array handling in JSON requests
 
-<footer>
+## Technical Description
 
-<!--
-  <<< Author notes: Footer >>>
-  Add a link to get support, GitHub status page, code of conduct, license link.
--->
+The Domino’s online ordering API accepts orders with an empty `Payments: []` array and processes them as if they are fully paid, rather than rejecting them or treating them as Cash on Delivery (COD). In affected store configurations, this results in the order being marked as “paid” in the store’s POS system, even though no payment method was supplied.
 
----
+When COD prompts are disabled in the store’s Pulse POS settings, delivery staff receive no “Amount Due” notification on manifests or driver slips. This allows orders to be fulfilled and delivered with no payment being collected, as both the backend and driver interface indicate the order has already been paid.
 
-Get help: [Post in our discussion board](https://github.com/orgs/skills/discussions/categories/github-pages) &bull; [Review the GitHub status page](https://www.githubstatus.com/)
+## Proof of Concept
 
-&copy; 2023 GitHub &bull; [Code of Conduct](https://www.contributor-covenant.org/version/2/1/code_of_conduct/code_of_conduct.md) &bull; [MIT License](https://gh.io/mit)
+### Attack Payload
 
-</footer>
+```json
+{
+  "Order": {
+    "StoreID": "7450",
+    "OrderMethod": "WEB",
+    "ServiceMethod": "Delivery",
+    "Address": {
+      "StreetNumber": "165",
+      "StreetName": "E TROPICANA AVE",
+      "City": "LAS VEGAS",
+      "Region": "NV",
+      "PostalCode": "89109"
+    },
+    "FirstName": "Test",
+    "LastName": "Customer",
+    "Email": "test@example.com",
+    "Phone": "7020000000",
+    "Products": [
+      {
+        "Code": "P12IPAZA",
+        "Qty": 1,
+        "Options": {
+          "O": {
+            "1/1": "1.0"
+          }
+        }
+      }
+    ],
+    "Payments": []
+  }
+}
+```
+
+### Validation Steps
+
+1. **Construct Order Payload:** Create a valid order JSON payload containing:
+- Valid store ID
+- Menu items
+- Delivery address
+- Customer details
+1. **Set Empty Payments:** Set `"Payments": []` in the payload, omitting any payment information
+1. **Submit Request:** Send the payload to `/price-order` → `/place-order`
+1. **Observe Results:**
+- API returns `Status: 1` (order accepted)
+- `Amounts.Payment` equals the total order amount
+- `AmountsBreakdown.Cash` shows 0
+- Driver or store POS does not indicate payment is due (if COD prompts are disabled)
+1. **Order Fulfillment:** The order is delivered without requiring payment
+
+## Business Impact
+
+**Direct Financial Loss:**
+
+- Orders are fulfilled and delivered without payment collection
+- Revenue loss equivalent to the value of unpaid orders
+
+**Scalability Risk:**
+
+- Exploitable at scale if attackers enumerate stores with COD enabled and no driver prompts
+- Potential for automated attacks targeting multiple locations
+
+**Operational Impact:**
+
+- Driver confusion when systems show conflicting payment status
+- Store management challenges in tracking unpaid orders
+- Potential inventory losses
+
+## Recommended Remediation
+
+### Immediate Actions
+
+1. **Implement Payment Validation:** Enforce strict validation to reject any order where `Payments` array is empty unless explicitly marked as COD
+1. **COD Handling:** If COD is allowed:
+- Automatically populate `AmountsBreakdown.Cash` with the order total
+- Display “Amount Due” prompts to drivers
+- Update POS systems to clearly indicate cash collection required
+1. **Backend Validation:** Ensure the backend cannot process an order as fully paid without:
+- A valid payment method, OR
+- Explicit COD declaration with proper flagging
+
+### Long-term Improvements
+
+1. **Payment Method Validation:** Implement comprehensive validation for all payment types
+1. **POS Integration:** Review and strengthen integration between ordering API and POS systems
+1. **Driver Interface Updates:** Ensure delivery personnel always receive accurate payment status information
+1. **Audit Trail:** Implement logging for all payment-related order processing
+
+## Risk Assessment
+
+**Likelihood:** High - Simple to exploit with basic API knowledge  
+**Impact:** High - Direct financial loss and operational disruption  
+**Overall Risk:** Critical
+
+## Recommendations for Testing
+
+Before implementing fixes, validate the remediation by:
+
+1. Testing edge cases with various payment array configurations
+1. Verifying COD orders are properly flagged throughout the system
+1. Confirming driver interfaces display accurate payment information
+1. Testing across different store configurations and POS settings
+
+## Conclusion
+
+This vulnerability represents a critical business logic flaw that directly impacts revenue. Immediate remediation is recommended to prevent financial losses and maintain operational integrity. The fix should focus on robust payment validation while ensuring legitimate COD orders continue to function properly.
